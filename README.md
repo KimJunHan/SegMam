@@ -1,6 +1,6 @@
-# SegMam — Camera + Pseudo-LiDAR BEV Segmentation with a Lightweight Mamba Lifting Block
+# SegMam — Camera + Pseudo-LiDAR BEV Segmentation with a Lightweight Self-Mamba Lifting Block
 
-SegMam performs joint **BEV map and object segmentation** on the nuScenes dataset by fusing surround-view camera features with **pseudo-LiDAR** (radar-format) point features through a transformer-based lifter whose latent BEV grid is refined by a **lightweight Mamba state-space block**. The lightweight Mamba block is obtained by **structural pruning of a trained heavy variant** (`d_state` 8→4, `expand` 2→1) and is used **eval-time only** — no additional training is required to reproduce the headline result.
+SegMam performs joint **BEV map and object segmentation** on the nuScenes dataset by fusing surround-view camera features with **pseudo-LiDAR** (radar-format) point features. The image lifter refines its BEV latents with a **6-layer bidirectional self-Mamba block**, and a separate **6-layer deformable cross-attention fuser** (Q = camera BEV, K / V = pseudo-LiDAR BEV) merges the two streams. The self-Mamba block in the lifter is the only Mamba component active in the released forward path; the **lightweight variant** is obtained by **structural pruning of a trained heavy self-Mamba** (`d_state` 8 → 4, `expand` 2 → 1) and is used **eval-time only** — no additional training is required to reproduce the headline result.
 
 ## Result (nuScenes trainval, DRN val split, single RTX PRO 6000)
 
@@ -15,13 +15,42 @@ SegMam performs joint **BEV map and object segmentation** on the nuScenes datase
 
 All numbers come from the released checkpoint `segmam_pseudolidar_mambalight_sliced/model-000075000.pth` evaluated with `SEGMAM_MAMBA_LIGHT=1`. The drivable-area IoU is reported at the class-specific best threshold (`drivable_th=40`), matching the protocol of the baseline paper.
 
-## Method (brief)
+## Architecture (precise)
 
-1. **Image encoder.** Frozen DINOv2 ViT (with adapter), producing multi-scale image features at the patch-aligned input resolution `448 × 896`.
-2. **Pseudo-LiDAR encoder.** Sparse voxel encoder (VoxelNet-style SVFE) that turns the 5-sweep accumulated pseudo-LiDAR point cloud into a BEV feature map. The input modality is structurally the same 18-channel sweep stack used by radar-based BEV fusion methods; in this release we treat it as pseudo-LiDAR (depth-derived 3D points lifted into the radar feature layout).
-3. **Transformer lift + fuse.** Deformable-attention lifting from image features into a 200 × 200 BEV grid, fused with the pseudo-LiDAR feature map. The BEV queries are initialized from image features and combined with a learned query bank.
-4. **Lightweight self-Mamba refinement.** A 6-layer Mamba state-space block refines the BEV latents. The released model uses the **light** variant (`d_state=4`, `expand=1`, `d_inner=128`) obtained by slicing the trained heavy block's weights — no additional training. Selective-scan cost scales with `d_inner × d_state`, so the light variant is ≈ 4 × cheaper at inference than the heavy one.
-5. **BEV decoders.** Two heads share the BEV trunk: a binary BCE drivable/object head (pos-weight ≈ 2.13) and a multi-label sigmoid focal loss (`alpha=0.25, gamma=3`) map head.
+All BEV tensors live on a `200 × 200` grid covering `[-50, 50] m × [-50, 50] m` in the ego frame (resolution `0.5 m`). Latent channels are `C = 128` throughout.
+
+1. **Image encoder.** Frozen DINOv2 ViT-B/14 with an adapter (`nets/dino_v2_with_adapter/`), producing multi-scale image features (`num_levels = 4` when `use_multi_scale_img_feats: true`) at the patch-aligned input resolution `448 × 896`.
+2. **Pseudo-LiDAR encoder.** A VoxelNet-style sparse voxel feature encoder (`nets/voxelnet.py`, SVFE + voxel projection) turns the 5-sweep accumulated point cloud into a BEV feature map. The 18-channel sweep stack is structurally the same layout used by radar-based BEV fusion methods; in this release we name it pseudo-LiDAR.
+3. **Image-to-BEV lifter (encoder, `num_layers = 6`).** Each layer applies, in order:
+   * **Multi-Scale Deformable Self-Mamba** (`self_mamba` in `CrossMamba/example.py`) — refines the camera BEV queries via deformable sampling (`n_levels = 4`, `n_points = 4`) followed by a bidirectional Mamba state-space block. The Mamba block uses `d_conv = 4` and is the SegMam-specific component. The **released lightweight variant** uses `d_state = 4`, `expand = 1` (so `d_inner = C × expand = 128`); the heavy variant uses `d_state = 8`, `expand = 2` (`d_inner = 256`). Selective-scan cost scales with `d_inner × d_state`, so the light variant is ≈ 4 × cheaper at inference than the heavy one.
+   * Vanilla Deformable Self-Attention (`MSDeformAttn`, `n_heads = 8`, `n_points = 4`).
+   * **Spatial Cross-Attention** (`MSDeformAttn`, `n_heads = 8`, `n_points = 4`) lifting image features into the BEV grid using camera-projection reference points.
+   * Layer-norm → FFN (`ffn_dim = 1028`) → layer-norm.
+4. **Camera + Pseudo-LiDAR fuser (`num_layers = 6`).** Each fuser layer applies:
+   * Vanilla Deformable Self-Attention on the BEV stream.
+   * **FusingCrossAttentionV2** — multi-scale deformable cross-attention with `Q = (camera-encoded BEV ⊕ learned fuse queries ⊕ positional)`, `K / V = pseudo-LiDAR BEV` (`MSDeformAttn`, `d_model = 128`, `n_heads = 8`, `n_points = 4`). This is the actual dual-stream fusion mechanism in the released forward path.
+   * Layer-norm → FFN → layer-norm.
+
+   *Note.* The released checkpoint also contains weights for a `cross_mamba` (`d_state = 8`, `expand = 2`) module that is instantiated inside the fuser. In the released `forward` path this module is called but its output is immediately reassigned, so it does **not** contribute to the final prediction in this release — it is preserved for ablation and for backward compatibility with the heavy training recipe. The substantive Mamba contribution lives in the **encoder's self-Mamba block** (item 3).
+5. **BEV decoders.** Two heads share the BEV trunk: a binary BCE drivable / object head (`SimpleLoss`, `pos_weight ≈ 2.13`) and a multi-label sigmoid-focal-loss map head (`alpha = 0.25`, `gamma = 3`).
+
+### Key hyperparameters at a glance
+
+| Symbol            | Value | Where                                                                 |
+| ----------------- | ----- | --------------------------------------------------------------------- |
+| `C` (latent dim)  | 128   | `latent_dim` in `SegnetTransformerLiftFuse`                           |
+| `num_layers`      | 6     | `configs/*/*.yaml`                                                    |
+| `num_levels` (img feats) | 4 | `use_multi_scale_img_feats: true`                                   |
+| Deform-attn `n_heads`    | 8 | `MSDeformAttn(d_model=128, n_heads=8, n_points=4)`                  |
+| Deform-attn `n_points`   | 4 | same                                                                 |
+| Self-Mamba `n_levels`    | 4 | `self_mamba(..., n_levels=4, n_points=4)`                            |
+| Self-Mamba `n_points`    | 4 | same                                                                 |
+| Self-Mamba `d_conv`      | 4 | `Mamba(..., d_conv=4)`                                               |
+| Self-Mamba `d_state` (released light / heavy) | 4 / 8 | env `SEGMAM_MAMBA_D_STATE`, `SEGMAM_MAMBA_LIGHT=1` aliases the light values |
+| Self-Mamba `expand`  (released light / heavy) | 1 / 2 | env `SEGMAM_MAMBA_EXPAND`                                      |
+| BEV grid          | 200 × 200 (× 8 vertical) | `Z = 200, X = 200, Y = 8` in `train.py / eval.py / vis_eval.py` |
+| Input image size  | 448 × 896 | `final_dim` in `configs/*/*.yaml`                                |
+| `nsweeps`         | 5 | `configs/*/*.yaml`                                                   |
 
 ## Repository layout
 
