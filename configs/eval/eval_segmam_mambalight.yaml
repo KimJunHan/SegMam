@@ -1,0 +1,52 @@
+# SegMam — eval of the lightweight self_mamba variant
+# (d_state 8->4, expand 2->1, obtained by structural pruning of the heavy variant — no extra training).
+# Run with: SEGMAM_MAMBA_LIGHT=1 python eval.py --config configs/eval/eval_segmam_mambalight.yaml
+
+# model name
+exp_name: 'SegMam_mambalight'
+
+# Eval parameters
+log_freq: 200
+shuffle: false
+dset: 'trainval'
+batch_size: 1
+nworkers: 8
+do_drn_val_split: true
+
+# Directories
+data_dir: '/path/to/nuscenes/trainval'   # set to your nuScenes trainval root
+custom_dataroot: 'datasets/scaled_images'
+log_dir: 'logs_nuscenes'
+init_dir: './checkpoints/segmam_pseudolidar_mambalight_sliced'
+ignore_load: null
+load_step: 75000
+
+# Data parameters
+final_dim: [448, 896]  # to match //8, //14, //16 and //32 in Vit
+ncams: 6
+nsweeps: 5
+
+# Model parameters
+encoder_type: 'dino_v2'
+pseudolidar_encoder_type: 'voxel_net'
+use_rpn_pseudolidar: false
+train_task: 'both'
+use_pseudolidar: true
+use_pseudolidar_filters: false
+use_pseudolidar_encoder: true
+use_metapseudolidar: false
+use_shallow_metadata: true
+use_pre_scaled_imgs: false
+use_obj_layer_only_on_map: true
+init_query_with_image_feats: true
+do_rgbcompress: true
+use_multi_scale_img_feats: true
+num_layers: 6
+
+device_ids: [0]
+freeze_dino: true
+do_feat_enc_dec: true
+combine_feat_init_w_learned_q: true
+model_type: 'transformer'
+use_pseudolidar_occupancy_map: false
+learnable_fuse_query: true

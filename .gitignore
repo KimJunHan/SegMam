@@ -1,0 +1,46 @@
+# Python bytecode / packaging
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Compiled CUDA / native extensions
+*.so
+*.o
+*.cu.o
+
+# Tooling
+.idea/
+.vscode/
+.ipynb_checkpoints/
+*.swp
+.DS_Store
+
+# Logs / runtime artifacts
+logs_nuscenes/
+torchrun_logs/
+inference_img/
+inferencetime/
+model_iou/
+wandb/
+*.log
+
+# Datasets / pre-scaled images
+datasets/
+nuscenes_data/
+
+# Checkpoints — only the released 81.6 / 335 ms ckpt is tracked (via Git LFS).
+# Ignore all other checkpoint dirs that may appear during training/experiments.
+checkpoints/*
+!checkpoints/segmam_pseudolidar_mambalight_sliced/
+checkpoints/segmam_pseudolidar_mambalight_sliced/*
+!checkpoints/segmam_pseudolidar_mambalight_sliced/model-000075000.pth
+
+# Misc generated
+TODO.md
+*.tmp
