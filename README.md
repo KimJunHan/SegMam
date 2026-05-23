@@ -1,6 +1,6 @@
-# SegMam — Camera + Pseudo-LiDAR BEV Segmentation with a Lightweight Self-Mamba Lifting Block
+# SegMam — Camera + Pseudo-LiDAR BEV Segmentation with Lightweight Self-Mamba & Cross-Mamba Blocks
 
-SegMam performs joint **BEV map and object segmentation** on the nuScenes dataset by fusing surround-view camera features with **pseudo-LiDAR** (radar-format) point features. The image lifter refines its BEV latents with a **6-layer bidirectional self-Mamba block**, and a separate **6-layer deformable cross-attention fuser** (Q = camera BEV, K / V = pseudo-LiDAR BEV) merges the two streams. The self-Mamba block in the lifter is the only Mamba component active in the released forward path; the **lightweight variant** is obtained by **structural pruning of a trained heavy self-Mamba** (`d_state` 8 → 4, `expand` 2 → 1) and is used **eval-time only** — no additional training is required to reproduce the headline result.
+SegMam performs joint **BEV map and object segmentation** on the nuScenes dataset by fusing surround-view camera features with **pseudo-LiDAR** (radar-format) point features. The image lifter refines its BEV latents with a **6-layer bidirectional self-Mamba block**, and a **6-layer bidirectional cross-Mamba fuser** (Q = camera BEV, K / V = pseudo-LiDAR BEV) merges the two streams. The **lightweight variant** of the lifter's self-Mamba is obtained by **structural pruning of the trained heavy self-Mamba** (`d_state` 8 → 4, `expand` 2 → 1) and is used **eval-time only** — no additional training is required to reproduce the headline result.
 
 ## Result (nuScenes trainval, DRN val split, single RTX PRO 6000)
 
@@ -27,11 +27,10 @@ All BEV tensors live on a `200 × 200` grid covering `[-50, 50] m × [-50, 50] m
    * **Spatial Cross-Attention** (`MSDeformAttn`, `n_heads = 8`, `n_points = 4`) lifting image features into the BEV grid using camera-projection reference points.
    * Layer-norm → FFN (`ffn_dim = 1028`) → layer-norm.
 4. **Camera + Pseudo-LiDAR fuser (`num_layers = 6`).** Each fuser layer applies:
+   * **Cross-Mamba** (`cross_mamba` in `CrossMamba/example.py`, `d_state = 8`, `expand = 2`, `d_conv = 4`, bidirectional) — dual-stream fusion with `Q = camera BEV` and `K / V = pseudo-LiDAR BEV`, exactly as instantiated at `nets/segnet_transformer_lift_fuse_new_decoders.py:2108`.
    * Vanilla Deformable Self-Attention on the BEV stream.
-   * **FusingCrossAttentionV2** — multi-scale deformable cross-attention with `Q = (camera-encoded BEV ⊕ learned fuse queries ⊕ positional)`, `K / V = pseudo-LiDAR BEV` (`MSDeformAttn`, `d_model = 128`, `n_heads = 8`, `n_points = 4`). This is the actual dual-stream fusion mechanism in the released forward path.
+   * **FusingCrossAttentionV2** — multi-scale deformable cross-attention (`MSDeformAttn`, `d_model = 128`, `n_heads = 8`, `n_points = 4`) between the BEV stream and the pseudo-LiDAR BEV.
    * Layer-norm → FFN → layer-norm.
-
-   *Note.* The released checkpoint also contains weights for a `cross_mamba` (`d_state = 8`, `expand = 2`) module that is instantiated inside the fuser. In the released `forward` path this module is called but its output is immediately reassigned, so it does **not** contribute to the final prediction in this release — it is preserved for ablation and for backward compatibility with the heavy training recipe. The substantive Mamba contribution lives in the **encoder's self-Mamba block** (item 3).
 5. **BEV decoders.** Two heads share the BEV trunk: a binary BCE drivable / object head (`SimpleLoss`, `pos_weight ≈ 2.13`) and a multi-label sigmoid-focal-loss map head (`alpha = 0.25`, `gamma = 3`).
 
 ### Key hyperparameters at a glance
@@ -48,6 +47,9 @@ All BEV tensors live on a `200 × 200` grid covering `[-50, 50] m × [-50, 50] m
 | Self-Mamba `d_conv`      | 4 | `Mamba(..., d_conv=4)`                                               |
 | Self-Mamba `d_state` (released light / heavy) | 4 / 8 | env `SEGMAM_MAMBA_D_STATE`, `SEGMAM_MAMBA_LIGHT=1` aliases the light values |
 | Self-Mamba `expand`  (released light / heavy) | 1 / 2 | env `SEGMAM_MAMBA_EXPAND`                                      |
+| Cross-Mamba `d_state`    | 8 | `cross_mamba(dim=128, d_state=8)` (fuser)                            |
+| Cross-Mamba `expand`     | 2 | `Cross_Mamba(..., expand=2)`                                         |
+| Cross-Mamba `d_conv`     | 4 | `Cross_Mamba(..., d_conv=4)`                                         |
 | BEV grid          | 200 × 200 (× 8 vertical) | `Z = 200, X = 200, Y = 8` in `train.py / eval.py / vis_eval.py` |
 | Input image size  | 448 × 896 | `final_dim` in `configs/*/*.yaml`                                |
 | `nsweeps`         | 5 | `configs/*/*.yaml`                                                   |
